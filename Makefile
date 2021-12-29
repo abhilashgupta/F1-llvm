@@ -1,2 +1,2 @@
 basic:
-	clang basic_handwritten_gram.ll
+	clang basic_handwritten_gram.ll -o basic
