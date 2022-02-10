@@ -13,9 +13,9 @@ Usage: python3 main.py <grammar.json>
     with open(gfile) as gf:
         fc = gf.read()
         my_grammar = json.loads(fc)
-    c_grammar = pyfuzzer.CTrans(my_grammar).translate()
+    c_grammar = fuzzer.CTrans(my_grammar).translate()
 
-    l = pyfuzzer.LlvmIrFuzzer(c_grammar).fuzz_src()
+    l = fuzzer.LlvmIRFuzzer(c_grammar).fuzz_src()
     with open('fuzz.ll', 'w') as f:
         print(l, file=f)
 

@@ -367,7 +367,7 @@ class PyRecCompiledFuzzer(PyCompiledFuzzer):
         for k in self.grammar:
             self.key_recursion[k] = self.is_key_recursive(k, k, set())
 
-class LlvmIrFuzzer(PyRecCompiledFuzzer):
+class LlvmIRFuzzer(PyRecCompiledFuzzer):
     header = '''; -> the semi-colon is the character to start a one-line comment
 @.newline = private unnamed_addr constant [2 x i8] c"\\0A\\00", align 1 ; @.newline = '\\n'
 declare i32 @printf(i8*, ...) ; declare cstdio's printf\n\n'''
@@ -637,5 +637,4 @@ define void @initialise_random(i64 %max_size) {
         return self.init_fn + self.main_fn
 
     def fuzz_src(self, key='<start>'):
-        print(self.IR_gram_dict)
         return self.gen_fuzz_src() + self.gen_main_src()
