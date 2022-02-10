@@ -1,5 +1,4 @@
 import itertools
-import sys
 import random
 import os
 
@@ -265,9 +264,6 @@ result.append("%s")''' % self.esc(token))
 
     def string_pool_defs(self):
         result =[]
-        print("***")
-        print(self.pool_of_strings)
-        print("***")
         for k in self.pool_of_strings:
             result.append('''\
 pool_of_%(key)s = %(values)s''' % {
@@ -373,9 +369,10 @@ class PyRecCompiledFuzzer(PyCompiledFuzzer):
 
 class LlvmIrFuzzer(PyRecCompiledFuzzer):
     header = '''; -> the semi-colon is the character to start a one-line comment
-@.newline = private unnamed_addr constant [2 x i8] c"\\0A\\00", align 1 ; @.newline = '\\n'\n'''
+@.newline = private unnamed_addr constant [2 x i8] c"\\0A\\00", align 1 ; @.newline = '\\n'
+declare i32 @printf(i8*, ...) ; declare cstdio's printf\n\n'''
 
-    global_data_structures = '''@max_depth = global i32 10, align 4 ; (global) int max_depth = 10;
+    global_data_structures = '''@max_depth = global i32 50, align 4 ; (global) int max_depth = 50;
 @depth = global i32 0, align 4 ; (global) int depth;
 @rarr = internal global [4 x i64] [i64 13343, i64 9838742, i64 223185, i64 802124], align 16 ; static uint64_t rarr[4] = {13343, 9838742, 223185, 802124};
 @rand_region_initp = common global [65536 x i8] zeroinitializer, align 16 ; uint8_t rand_region_initp[1ULL << 16];
@@ -474,46 +471,171 @@ define void @initialise_random(i64 %max_size) {
     ret void
 }\n\n'''
 
+    init_fn = '''define void @gen_init__(){ ; gen_init__ procedure
+  store i32 0, i32* @depth, align 4 ; initialise (global) depth = 0
+  call void @gen_start() ; calling gen_start()
+  ; printf(@.newline)
+  call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([2 x i8], [2 x i8]* @.newline, i64 0, i64 0))
+  ret void ; return void
+}\n\n'''
+
+    main_fn = '''define i32 @main(){
+    call void @initialise_random(i64 65536) ; initialise_random(rand_region_size);
+    %i_pointer = alloca i32, align 4 ; loop variable pointer on stack
+    store i32 0, i32* %i_pointer, align 4 ;write i = 0 to memory
+    %seed_location = alloca i32, align 4 ; pointer to seed on stack
+    store i32 0, i32* %seed_location, align 4 ; write seed = 0 to memory
+    %seed = load i32, i32* %seed_location, align 4 ; load seed's value into a variable
+    ; an alternative to previous 3 lines is to invoke the next getelementptr with 0, if seed is fixed
+    %rrp = load i8*, i8** @rand_regionp, align 8 ; local reference to rand_regionp
+    %new_rrp = getelementptr inbounds i8, i8* %rrp, i32 %seed ; new_rrp = rrp + seed
+    store i8* %rrp, i8** @rand_regionp, align 8 ; rand_regionp = new_rrp
+    %max_loop_p = alloca i32, align 4 ; maximum possible value of loop variable pointer on stack
+    store i32 50, i32* %max_loop_p, align 4 ; write max_loop = 50 to memory
+    br label %comparision_check; branch jump to comparision_check
+
+  comparision_check:
+    ; load the value of i_pointer into variable i
+    %i = load i32, i32* %i_pointer, align 4
+    ; load the value of max_loop_p into variable max_num (an alternative is compare directly to 10, if max_num is fixed)
+    %max_num = load i32, i32* %max_loop_p, align 4
+    %comp_result1 = icmp slt i32 %i, %max_num ; comp_result1 = true if i < max_num, false otherwise
+    ;branch jump to call_gen_init__ if comp_result1 is true, jump to return_block otherwise
+    br i1 %comp_result1, label %call_gen_init__, label %return_block
+
+  call_gen_init__:
+    call void @gen_init__() ; invoke gen_init__()
+    %i_new = add nsw i32 %i, 1 ; update i(new) = i + 1
+    store i32 %i_new, i32* %i_pointer, align 4; write updated i to memory
+    br label %comparision_check
+
+  return_block:
+    ret i32 0
+}'''
+
     randomising_fns = [map_fn, rotl_fn, next_fn, initialise_random_fn]
+
+    def __init__(self, grammar):
+        super().__init__(grammar)
+        self.create_IR_grammar()
+
+    # we need this because llvm IR defines all strings as globals
+    # to keep track of which string turns up in which rule, in which
+    # position in the expansion
+    def create_IR_grammar(self):
+        self.IR_gram_dict = dict()
+        for k,v in self.grammar.items():
+            self.IR_gram_dict[k] = {}
+            counter = 0
+            for i, expnsn in enumerate(v):
+                vlist = []
+                key = 'fe_' + self.k_to_s(k) +'.'+ str(i) + '.' + str(counter)
+                s = ''
+                for stri in expnsn:
+                    if len(stri) == 1: # it is a character and not a non-terminal
+                        s += stri
+                    else: # it is a non-terminal of the structure "<[string.printable]+>"
+                        if len(s) > 0:
+                            counter +=1
+                            vlist.append((key, s)) # key, value tuple. will use this key to name strings in IR
+                        vlist.append(stri) # non-terminal
+                        s = '' # new string again
+                        key = 'fe_' + self.k_to_s(k) +'.'+ str(i) + '.' + str(counter) # new key
+                if len(s) > 0:
+                    vlist.append((key, s)) # when the expnsn ends and there's still string left.
+                self.IR_gram_dict[k][i] = vlist
 
     def get_short_expnsns(self):
         res = ""
         pool_str = ""
         for k,v in self.pool_of_strings.items():
-            pool_str += f"@pool_{k[1:-1]} = global [{len(v)} x i8*] ["
+            name = self.k_to_s(k)
+            pool_str += f"@pool_{name} = global [{len(v)} x i8*] ["
             for i in range(len(v)):
-                res += f"@.{k}.{i} = private unnamed_addr constant [{len(v[i])+ 1} x i8] c\"{v[i]}\\00\", align 1\n"
-                pool_str += f"i8* getelementptr inbounds ([{len(v[i]) +1} x i8], [{len(v[i]) +1} x i8]* @.{k}.{i}, i32 0, i32 0)"
+                res += f"@.{name}.{i} = private unnamed_addr constant [{len(v[i])+ 1} x i8] c\"{v[i]}\\00\", align 1\n"
+                pool_str += f"i8* getelementptr inbounds ([{len(v[i]) +1} x i8], [{len(v[i]) +1} x i8]* @.{name}.{i}, i32 0, i32 0)"
                 if i < len(v)-1:
                     pool_str += ", "
-            pool_str += "], align 16\n\n"
+            pool_str += f"], align 16 ; pool of shortest expn strings from {k}\n"
+        res += '\n'
         res += pool_str
+        res += '\n'
+        for v in self.IR_gram_dict.values():
+            for rule in v.values():
+                for expnsn in rule:
+                    if type(expnsn) is tuple: #contains a identifier, string tuple
+                        res += f"@.{expnsn[0]} = private unnamed_addr constant [{len(expnsn[1])+ 1} x i8] c\"{expnsn[1]}\\00\", align 1\n"
         return res
 
-    def add_global_variables(self):
-        return_val = ""
-        # for k,v in self.grammar.items():
-        #     print(k,v)
+    def gen_rule_src(self, rule, key, i):
+        res = []
+        for token in rule:
+            if type(token) is tuple: # token[0] = IR name of string, token[1] = string
+                str_size = len(token[1]) + 1
+                res.append(f'''call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([{str_size} x i8], [{str_size} x i8]* @.{token[0]}, i64 0, i64 0))''')
+            else: # it is another non-terminal
+                name = self.k_to_s(token)
+                res.append(f'''call void @gen_{name}()''')
+        return '\n'.join(res)
 
-        return self.get_short_expnsns()
+    def gen_alt_src(self, key):
+        name = self.k_to_s(key)
+        rules = self.grammar[key]
+        nrules = len(rules)
+        string_pool_len = len(self.pool_of_strings[key])
+        result = []
+        result.append(f'''define void @gen_{name}() {{;@gen_start procedure
+  %md_local = load i32, i32* @max_depth, align 4; load global max_depth into md_local for local use
+  %d_local = load i32, i32* @depth, align 4; load global depth into d_local for local use
+  %comp_result1 = icmp sgt i32 %d_local, %md_local ; bool comp_result1 = depth > max_depth
+  ; branch jump to s_expr if comp_result1 == true, else, jump to full_expansion
+  br i1 %comp_result1, label %s_expr, label %full_expansion
+  s_expr: ; when depth > max_depth, return choice(s_expr)
+    %random_choice = call i8 @map(i8 {string_pool_len}) ; random_choice = map({string_pool_len})
+    ; spointer = pointer to randomly selected element shortest expansion element
+    %spointer = getelementptr inbounds [{string_pool_len} x i8*], [{string_pool_len} x i8*]* @pool_{name}, i64 0, i8 %random_choice
+    %output = load i8*, i8** %spointer, align 16 ; load the element
+    call i32 (i8*, ...) @printf(i8* %output) ; print it
+    br label %return_block ; branch jump to return_block
+  full_expansion: ; when depth <= max_depth, return any expansion after incrementing depth
+    %new_d_local = add nsw i32 1, %d_local ; new_d_local = d_local + 1
+    store i32 %new_d_local, i32* @depth, align 4 ; (global) depth = new_d_local
+    %random_choice1 = call i8 @map(i8 {nrules}) ; random_choice1 = map({nrules})
+    ; switch based on random_choice1's value, default is return_block
+    switch i8 %random_choice1, label %return_block [
+''')
+        for i in range(nrules):
+            result.append(f'''      i8 {i}, label %f_expnsn_case{i} ; jump to f_expnsn_case{i}, if random_choice1={i}
+''')
+        result.append(f'''    ]
+    br label %return_block ; branch jump to return_block
+''')
+        IR_dict_rules_dict = self.IR_gram_dict[key]
+        for i, rule in IR_dict_rules_dict.items():
+            expnsn = self.gen_rule_src(rule, key, i)
+            result.append(f'''  f_expnsn_case{i}:
+{self.add_indent(expnsn,'    ')}
+    br label %return_block
+''')
+        result.append('''return_block:
+    ret void ; return void
+}\n\n''')
+        return ''.join(result)
+
+    def gen_fuzz_src(self):
+        result = []
+        result.append(self.header)
+        result.append(self.global_data_structures)
+        result.append(self.get_short_expnsns())
+        for fn in self.randomising_fns:
+            result.append(fn)
+        for key in self.grammar:
+            result.append(self.gen_alt_src(key))
+        return '\n'.join(result)
+
+    def gen_main_src(self):
+        return self.init_fn + self.main_fn
 
     def fuzz_src(self, key='<start>'):
-        result = ''
-        result += self.header
-        result += self.global_data_structures
-        result += self.add_global_variables()
-        for fn in self.randomising_fns:
-            result += fn
-        print (result)
-        # print(self
-        # .return_header())
-        # print(self.add_global_variables())
-#         rules = self.grammar[key]
-#         result = []
-#         for i, rule in enumerate(rules):
-#             result.append('''\
-#     if val == %d:
-# %s
-#         return''' % (i, self.add_indent(self.gen_rule_src(rule, key, i),'        ')))
-#         print(''.join(result))
-        # return self.__dict__
+        print(self.IR_gram_dict)
+        return self.gen_fuzz_src() + self.gen_main_src()

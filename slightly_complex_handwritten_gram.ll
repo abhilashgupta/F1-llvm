@@ -118,7 +118,7 @@ define void @initialize_random(i64 %max_size) {
 define void @gen_start() {;@gen_start procedure
     %md_local = load i32, i32* @max_depth, align 4; load global max_depth into md_local for local use
     %d_local = load i32, i32* @depth, align 4; load global depth into d_local for local use
-    call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([11 x i8], [11 x i8]* @.str.4, i64 0, i64 0), i32 %d_local)
+    ; call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([11 x i8], [11 x i8]* @.str.4, i64 0, i64 0), i32 %d_local)
     %comp_result1 = icmp sgt i32 %d_local, %md_local ; bool comp_result1 = depth > max_depth
     ; branch jump to s_expr if comp_result1 == true, else, jump to full_expansion
     br i1 %comp_result1, label %s_expr, label %full_expansion
@@ -189,8 +189,7 @@ define void @gen_p() {;@gen_p procedure
     ret void ; return void
 }
 
-; gen_init__ procedure
-define void @gen_init__(){
+define void @gen_init__(){ ; gen_init__ procedure
   store i32 0, i32* @depth, align 4 ; initialise (global) depth = 0
   call void @gen_start() ; calling gen_start()
   ; printf(@.newline)
